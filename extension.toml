@@ -1,0 +1,21 @@
+id = "vulnera"
+name = "Vulnera"
+version = "0.1.1"
+schema_version = 1
+authors = ["Vulnera-team"]
+description = "Dependency vulnerability diagnostics and quick fixes for various manifest files using the Vulnera Language Server."
+repository = "https://github.com/vulnera-rs/Vulnera"
+
+[language_servers.vulnera]
+name = "Vulnera Language Server"
+languages = ["JSON", "TOML", "XML", "Groovy", "Go", "Python", "Ruby", "YAML"]
+
+[language_servers.vulnera.language_ids]
+"JSON"   = "json"
+"TOML"   = "toml"
+"XML"    = "xml"
+"Groovy" = "groovy"
+"Go"     = "go"
+"Python" = "python"
+"Ruby"   = "ruby"
+"YAML"   = "yaml"

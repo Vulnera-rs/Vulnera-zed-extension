@@ -1,0 +1,10 @@
+# Compiled artifacts
+/target/
+*.wasm
+*.so
+
+# Logs
+*.log
+
+# Operating system specific
+.DS_Store

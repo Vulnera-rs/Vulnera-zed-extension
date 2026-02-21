@@ -1,0 +1,23 @@
+[workspace]
+
+[package]
+name = "vulnera-zed-extension"
+version = "0.1.1"
+edition = "2024"
+description = "Zed extension that downloads and launches the Vulnera Language Server (LSP) native binary to provide dependency vulnerability diagnostics and quick fixes."
+license = "MIT"
+repository = "https://github.com/vulnera-dev/vulnera"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+zed_extension_api = "0.6"
+
+[profile.release]
+lto = true
+opt-level = "s"
+codegen-units = 1
+strip = "symbols"

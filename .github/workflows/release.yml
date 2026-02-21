@@ -1,0 +1,221 @@
+name: zed-extension-release
+
+on:
+  push:
+    tags:
+      - "zed-v*"
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "extension.toml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "extension.toml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. zed-v0.2.0)"
+        required: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # wasm32-wasip1 is the target Zed uses for extensions compiled to WASM.
+  WASM_TARGET: wasm32-wasip1
+
+jobs:
+  # ── Quality gate ──────────────────────────────────────────────────────────────
+  validate:
+    name: Check & Clippy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (stable + WASM target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vulnera_zed_extension -> target
+
+      - name: cargo check (native)
+        working-directory: vulnera_zed_extension
+        run: cargo check --locked
+
+      - name: cargo check (wasm32-wasip1)
+        working-directory: vulnera_zed_extension
+        run: cargo check --locked --target wasm32-wasip1
+
+      - name: cargo clippy (native)
+        working-directory: vulnera_zed_extension
+        run: cargo clippy --locked -- -D warnings
+
+  # ── Build WASM binary ─────────────────────────────────────────────────────────
+  build:
+    name: Build WASM
+    needs: validate
+    runs-on: ubuntu-latest
+
+    outputs:
+      extension_version: ${{ steps.read_version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (stable + WASM target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vulnera_zed_extension -> target
+
+      - name: Read extension version
+        id: read_version
+        working-directory: vulnera_zed_extension
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; \
+                          print(next(p['version'] for p in pkgs if p['name']=='vulnera-zed-extension'))")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Extension version: ${VERSION}"
+
+      - name: Build WASM (release)
+        working-directory: vulnera_zed_extension
+        run: cargo build --release --locked --target wasm32-wasip1
+
+      - name: Locate WASM artifact
+        working-directory: vulnera_zed_extension
+        run: |
+          WASM_FILE="target/wasm32-wasip1/release/vulnera_zed_extension.wasm"
+          echo "WASM artifact: $(ls -lh ${WASM_FILE})"
+          cp "${WASM_FILE}" extension.wasm
+
+      - name: Install zed CLI (for extension packaging validation)
+        run: |
+          # Install the Zed extension CLI tool if available; otherwise skip
+          cargo install zed-extension-cli --locked 2>/dev/null || true
+
+      - name: Validate extension manifest
+        working-directory: vulnera_zed_extension
+        # `zed-extension-cli pack` validates extension.toml + wasm at the same time.
+        # If the tool is not installed we skip gracefully.
+        run: |
+          if command -v zed-extension-cli &>/dev/null; then
+            zed-extension-cli pack --output vulnera-zed-extension.tar.gz
+          else
+            echo "zed-extension-cli not found — skipping manifest validation"
+            # Produce a minimal tarball of the extension directory for the release artifact.
+            tar czf vulnera-zed-extension.tar.gz \
+              extension.toml extension.wasm Cargo.toml README.md
+          fi
+          ls -lh vulnera-zed-extension.tar.gz
+
+      - name: Generate checksums
+        working-directory: vulnera_zed_extension
+        run: |
+          sha256sum extension.wasm > extension.wasm.sha256
+          sha256sum vulnera-zed-extension.tar.gz > vulnera-zed-extension.tar.gz.sha256
+          cat extension.wasm.sha256 vulnera-zed-extension.tar.gz.sha256 > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-extension-wasm
+          path: |
+            vulnera_zed_extension/extension.wasm
+            vulnera_zed_extension/extension.wasm.sha256
+            vulnera_zed_extension/vulnera-zed-extension.tar.gz
+            vulnera_zed_extension/vulnera-zed-extension.tar.gz.sha256
+            vulnera_zed_extension/SHA256SUMS.txt
+          if-no-files-found: error
+
+  # ── Create GitHub Release ─────────────────────────────────────────────────────
+  github-release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/zed-v') || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: zed-extension-wasm
+          path: release
+
+      - name: List release contents
+        run: ls -lh release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          name: "Vulnera Zed Extension v${{ needs.build.outputs.extension_version }}"
+          body: |
+            ## Vulnera Zed Extension v${{ needs.build.outputs.extension_version }}
+
+            ### Installation
+
+            **Via Zed Extension Registry** (recommended):
+            Open Zed → Extensions (`zed: extensions`) → search "Vulnera" → Install.
+
+            **Manual install** from this release:
+            1. Download `vulnera-zed-extension.tar.gz` below.
+            2. In Zed run `zed: install dev extension` and point it at the extracted directory.
+
+            ### How it works
+
+            On first activation, the extension automatically downloads the platform-native
+            `vulnera-adapter` binary from the [adapter release](https://github.com/vulnera-dev/vulnera/releases)
+            and caches it in the extension install directory. Subsequent launches reuse the
+            cached binary, re-downloading only when the extension version changes.
+
+            ### Supported Platforms
+
+            | OS | Architecture | Binary |
+            |---|---|---|
+            | Linux | x86_64 | `vulnera-adapter-x86_64-unknown-linux-gnu` |
+            | Linux | aarch64 | `vulnera-adapter-aarch64-unknown-linux-gnu` |
+            | macOS | x86_64 (Intel) | `vulnera-adapter-x86_64-apple-darwin` |
+            | macOS | aarch64 (Apple Silicon) | `vulnera-adapter-aarch64-apple-darwin` |
+            | Windows | x86_64 | `vulnera-adapter-x86_64-pc-windows-msvc.exe` |
+
+            ### Environment Variable Overrides
+
+            | Variable | Purpose |
+            |---|---|
+            | `VULNERA_ADAPTER_PATH` | Absolute path to a custom binary (skips download) |
+            | `VULNERA_API_URL` | Override the Vulnera API base URL |
+            | `VULNERA_API_KEY` | API key for authenticated requests |
+            | `VULNERA_LOG` | Tracing log filter (e.g. `debug`, `info`) |
+
+            ### Supported Ecosystems
+            npm · PyPI · Cargo · Go · Maven · Composer · RubyGems · NuGet
+
+          files: |
+            release/extension.wasm
+            release/extension.wasm.sha256
+            release/vulnera-zed-extension.tar.gz
+            release/vulnera-zed-extension.tar.gz.sha256
+            release/SHA256SUMS.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+          fail_on_unmatched_files: true
